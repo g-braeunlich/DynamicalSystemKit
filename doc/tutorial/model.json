@@ -1,0 +1,22 @@
+{
+    "T_1": {
+        "__type__": "ConstantQuantity",
+        "value": 10.0
+    },
+    "T_2": {
+        "__type__": "GlobalExternalQuantity",
+        "n": 1
+    },
+    "pump": { "__type__": "Pump" },
+    "valve": {
+        "__type__": "MixingValve",
+        "T_1": { "__foreign_quantity__": "T_1" },
+        "T_2": { "__foreign_quantity__": "T_2" }
+    },
+    "tank": {
+        "__type__": "Tank",
+        "V": 1.0,
+        "T_in": { "__foreign_quantity__": "valve.T_out" },
+        "Phi": { "__foreign_quantity__": "pump.Phi" }
+    }
+}

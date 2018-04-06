@@ -1,0 +1,12 @@
+*.pyc
+__pycache__
+*.aux
+*.log
+*.pdf
+*.nav
+*.snm
+*.toc
+*.out
+*.o
+*.d
+TODO
