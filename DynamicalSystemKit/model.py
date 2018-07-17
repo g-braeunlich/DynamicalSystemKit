@@ -10,8 +10,6 @@ from .utils.attr import getattr_recursive
 
 # pylint: disable=too-few-public-methods
 
-# TODO: dt_ctrl < dt
-
 
 class QuantityMeta(type):
     def __call__(cls, *args, name=None, **kwargs):
@@ -941,7 +939,7 @@ def solve_ode(d_X, x0, t, tcrit=None, Y=None, exception_on_error=False, out=None
         res = _x[1]
         _x = _x[0]
         if res['message'] != 'Integration successful.':
-            raise RuntimeError('scipy.odeint failed.')
+            raise RuntimeError('scipy.odeint failed: ' + res['message'])
     out[:, :Nx] = _x
     if Y is not None:
         _v = numerics.interp_linear(
@@ -971,6 +969,10 @@ def simulate(initial_data, t, d_X, Y=None, tcrit=None, t_ctrl_sampler=None,
                 tcrit = numpy.unique(numpy.concatenate((t_ctrl, tcrit)))
             else:
                 tcrit = t_ctrl
+    if tcrit is not None:
+        t_full = numpy.unique(numpy.concatenate((t, tcrit)))
+        if t.size < t_full.size:
+            t = t_full
     if external_quantity_data is not None:
         t_src = external_quantity_data[d_X.t]
         data = arrange_data(
