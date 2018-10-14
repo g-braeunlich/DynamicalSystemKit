@@ -2,9 +2,8 @@
 
 import argparse
 
-from lib import elements
-from sim import model
-from sim.utils import attr
+from DynamicalSystemKit import model
+from DynamicalSystemKit.utils import attr
 
 
 def prm(S, prm_list=()):
@@ -23,10 +22,25 @@ def evl(S, s=None):
     print(s + " =", f(*args, **kwargs))
 
 
-def exec_action(model_file=None, action=None, **kwargs):
-    S = model.Model.from_file(model_file, elements)
+def exec_action(*, model_file, action, **kwargs):
+    _model = load_module(model_file).Model
     f = globals()[action]
-    f(S, **kwargs)
+    f(_model, **kwargs)
+
+
+def load_module(path):
+    import sys
+    import os
+    import importlib
+    module_path = path.rstrip("/")
+    module_dir = os.path.dirname(module_path)
+    module_name = os.path.basename(module_path)
+
+    if module_name[-3:] == ".py":
+        module_name = module_name[:-3]
+    if module_dir:
+        sys.path.append(module_dir)
+    return importlib.import_module(module_name)
 
 
 parser = argparse.ArgumentParser(description='Model info')
