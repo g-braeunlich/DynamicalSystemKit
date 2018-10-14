@@ -4,59 +4,52 @@ from collections import OrderedDict
 import numpy
 import scipy
 
-from . import code_generator, numerics, model_json
+from . import code_generator, numerics
 from .utils import structured_data, depcalc, dct
 from .utils.attr import getattr_recursive
 
-# pylint: disable=too-few-public-methods
+
+class Node:
+    def __init__(self, parent=None, alias=None):
+        self.parent = parent
+        self.alias = alias
+
+    def __repr__(self):
+        parent_repr = self.parent and (repr(self.parent), )
+        alias = self.alias or object.__repr__(self)
+        return ".".join(((parent_repr or ()) + (alias,)))
+
+    def bind_to_parent(self, parent, alias):
+        self.parent = parent
+        self.alias = alias
 
 
-class QuantityMeta(type):
-    def __call__(cls, *args, name=None, **kwargs):
-        unbound = type.__call__(cls, *args, **kwargs)
-        if name is not None:
-            return unbound.resource(None, name)
-        return unbound
+class Expressible:
+    def expression(self, ode_builder, slc_prefix=""):
+        pass
+
+    def expression_view(self, ode_builder, slc_prefix=""):
+        return self.expression(ode_builder, slc_prefix=slc_prefix)
 
 
-class Quantity:
+class Quantity(Node, Expressible):
     """ Base class for quantities (state function, control quantity) """
 
-    def __init__(self, n=1):
+    def __init__(self, n=1, **kwargs):
         self.n = n  #: Dimension of the quantities vector space
+        super().__init__(**kwargs)
 
-    def resource(self, *args, **kwargs):
-        return self.Resource(self, *args, **kwargs)
+    def register(self, ode_builder):
+        pass
 
-    class Resource:
-        def __init__(self, base, parent, alias):
-            self.base = base
-            self.parent = parent
-            self.alias = alias
+    def dependencies(self):
+        return frozenset()
 
-        def register(self, ode_builder):
-            pass
-
-        def expression(self, ode_builder, slc_prefix=""):
-            pass
-
-        def dependencies(self):
-            return frozenset()
-
-        def computations(self):
-            return frozenset()
-
-        def __getitem__(self, slc):
-            return ForeignQuantity().resource(alias=self.alias, parent=self.parent,
-                                              target=self, sub_slice=slc)
-
-        def __repr__(self):
-            parent_repr = self.parent and (repr(self.parent), )
-            alias = self.alias or object.__repr__(self)
-            return ".".join(((parent_repr or ()) + (alias,)))
+    def computations(self):
+        return frozenset()
 
 
-class ConstantQuantity(Quantity, metaclass=QuantityMeta):
+class ConstantQuantity(Quantity):
     def __init__(self, value):
         self.value = value
         shp = numpy.shape(value)
@@ -66,63 +59,61 @@ class ConstantQuantity(Quantity, metaclass=QuantityMeta):
             n = 1
         super().__init__(n=n)
 
-    class Resource(Quantity.Resource):
-        def expression(self, ode_builder, slc_prefix=""):
-            return str(self.base.value)
+    def expression(self, ode_builder, slc_prefix=""):
+        return str(self.value)
 
 
 class SlicedQuantity(Quantity):
     """ Quantity needing slots in an array """
     storage_name = None
 
-    class Resource(Quantity.Resource):
-        def __init__(self, *args, key=None, sub_slice=None, copy="", **kwargs):
-            super().__init__(*args, **kwargs)
-            self.key = key or self
-            self.sub_slice = sub_slice
-            self._copy = copy
+    def __init__(self, *args, key=None, sub_slice=None, copy="", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.key = key or self
+        self.sub_slice = sub_slice
+        self._copy = copy
 
-        def expression(self, ode_builder, slc_prefix=""):
-            slc = self.request_slice(ode_builder)
-            if self.sub_slice is not None:
-                if self.sub_slice == slice(None):
-                    slc = structured_data.slicify(slc)
-                else:
-                    slc = structured_data.slc_compose(slc, self.sub_slice)
-            return "{}[{}{}]{}".format(self.base.storage_name, slc_prefix, slc,
-                                       self._copy)
+    def expression(self, ode_builder, slc_prefix=""):
+        slc = self.request_slice(ode_builder)
+        if self.sub_slice is not None:
+            if self.sub_slice == slice(None):
+                slc = structured_data.slicify(slc)
+            else:
+                slc = structured_data.slc_compose(slc, self.sub_slice)
+        return "{}[{}{}]{}".format(self.storage_name, slc_prefix, slc,
+                                   self._copy)
 
-        def register(self, ode_builder):
-            self.request_slice(ode_builder)
+    def register(self, ode_builder):
+        self.request_slice(ode_builder)
 
-        def request_slice(self, ode_builder):
-            return ode_builder.request_slice(self.key, self.base.n, type(self.base))
+    def request_slice(self, ode_builder):
+        return ode_builder.request_slice(self.key, self.n, type(self))
 
-        def __getitem__(self, slc):
-            if self._copy:
-                raise ValueError("A copied resource cannot be indexed")
-            return type(self)(self.base, self.parent, self.alias, key=self.key, sub_slice=slc)
+    def __getitem__(self, slc):
+        if self._copy:
+            raise ValueError("A copied quantity cannot be indexed")
+        return type(self)(n=self.n, parent=self.parent, alias=self.alias,
+                          key=self.key,
+                          sub_slice=slc)
 
 
 class StateFunction(SlicedQuantity):
     storage_name = "_x"
     array_name_dx = "_dx"
 
-    class Resource(SlicedQuantity.Resource):
-        def expression_dx(self, ode_builder, flatten_slice=True, slc_prefix=""):
-            slc = self.request_slice(ode_builder)
-            if not flatten_slice:
-                slc = structured_data.slicify(slc)
-            return "{}[{}{}]".format(self.base.array_name_dx, slc_prefix, slc)
+    def expression_dx(self, ode_builder, flatten_slice=True, slc_prefix=""):
+        slc = self.request_slice(ode_builder)
+        if not flatten_slice:
+            slc = structured_data.slicify(slc)
+        return "{}[{}{}]".format(self.array_name_dx, slc_prefix, slc)
 
 
 class ManipulatedVariable(SlicedQuantity):
     storage_name = "_u"
 
-    class Resource(SlicedQuantity.Resource):
-        def copy(self):
-            return type(self)(self.base, self.parent, self.alias, key=self.key,
-                              sub_slice=self.sub_slice, copy=".copy()")
+    def copy(self):
+        return type(self)(n=self.n, parent=self.parent, alias=self.alias, key=self.key,
+                          sub_slice=self.sub_slice, copy=".copy()")
 
 
 class MonitoredQuantity(SlicedQuantity):
@@ -133,71 +124,6 @@ class ExternalQuantity(SlicedQuantity):
     """ External quanty, e.g. ambient temperature """
     storage_name = "_v"
 
-    @classmethod
-    def bound(cls, name, **kwargs):
-        return cls(name, **kwargs).resource(None, None)
-
-    def __init__(self, name, **kwargs):
-        super().__init__(**kwargs)
-        self._resource = super().resource(None, name)
-
-    def resource(self, *args, **kwargs):
-        return self._resource
-
-
-class MetaGlobalExternalQuantity(type):
-    def __call__(cls, name, n=1, **kwargs):
-        q = getattr(cls, name, None)
-        if not isinstance(q, ExternalQuantity):
-            q = ExternalQuantity(name=name, n=n)
-        return q.resource(None, name)
-
-
-class GlobalExternalQuantity(metaclass=MetaGlobalExternalQuantity):
-    pass
-
-
-class ForeignQuantity(Quantity):
-    """ Quanty from a different element to be used in the owner element """
-
-    def __init__(self):
-        super().__init__(n=None)
-
-    class Resource(Quantity.Resource):
-        def __init__(self, *args, target=None, sub_slice=None, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.target = target
-            self.sub_slice = sub_slice
-
-        def slc_expression(self, slc_prefix=""):
-            if self.sub_slice is None:
-                return ""
-            return "[{}{}]".format(slc_prefix, self.sub_slice)
-
-        def register(self, ode_builder):
-            self.target.register(ode_builder)
-
-        def expression(self, ode_builder, slc_prefix=""):
-            return self.target.expression(ode_builder, slc_prefix=slc_prefix) \
-                + self.slc_expression(slc_prefix)
-
-        def expression_dx(self, ode_builder, slc_prefix=""):
-            return self.target.expression_dx(ode_builder, slc_prefix=slc_prefix) \
-                + self.slc_expression(slc_prefix)
-
-        def dependencies(self):
-            return self.target.dependencies()
-
-        def computations(self):
-            return self.target.computations()
-
-        def __repr__(self):
-            return repr(self.target) + self.slc_expression()
-
-    @classmethod
-    def anonymous(cls, target=None):
-        return cls().resource(None, None, target=target)
-
 
 class ComputedQuantity(Quantity):
     def __init__(self, f_compute, **kwargs):
@@ -206,280 +132,196 @@ class ComputedQuantity(Quantity):
         if not isinstance(n, int):
             raise ValueError(
                 "The function has to be annotated with an int (dimension of the return value)")
-        super().__init__(n=n)
-        self.function = ComputedQuantityFunction(f_compute, **kwargs)
+        super().__init__(n=n, **kwargs)
+        self.function = ComputedQuantityFunction(
+            f_compute, return_quantities=(self,), **kwargs)
+        self._f = f_compute
 
-    def _resource(self, parent, *args, computation, **kwargs):
-        rsc = super().resource(parent, *args, computation=computation, **kwargs)
-        computation.return_resources = (rsc,)
-        return rsc
+    def __call__(self, *args, **kwargs):
+        return self._f(*args, **kwargs)
 
-    def resource(self, parent, *args, **kwargs):
-        computation = self.function.computation(parent)
-        return self._resource(parent, *args, computation=computation, **kwargs)
+    def computations(self):
+        return frozenset((self.function,))
 
-    def resource_by_args(self, parent, alias, **kwargs):
-        computation = self.function.computation_by_args(**kwargs)
-        return self._resource(parent, alias, computation=computation)
+    def expression(self, ode_builder, slc_prefix=""):
+        if self.parent and self.parent.name:
+            return "_".join(
+                tuple(self.parent.parent_names) + (self.parent.name, self.alias))
+        return self.alias
 
-    class Resource(Quantity.Resource):
-        def __init__(self, base, parent, alias, computation, **kwargs):
-            super().__init__(base, parent, alias, **kwargs)
-            expression = alias
-            if parent.name:
-                expression = "_".join(
-                    tuple(parent.parent_names) + (parent.name, expression))
-            self._expression = expression
-            self.computation = computation
-
-        def computations(self):
-            return frozenset((self.computation,))
-
-        def expression(self, ode_builder, slc_prefix=""):
-            return self._expression
-
-        def dependencies(self):
-            return frozenset(self.computation.resource_args.values())
+    def dependencies(self):
+        return self.function.dependencies()
 
 
-class Function:
+class Function(Node):
     f_prefix = ""
+    operation = "="
 
-    def __init__(self, f):
+    def __init__(self, f, *args, return_quantities=None, **kwargs):
+        super().__init__(*args, **kwargs)
         sig = inspect.signature(f)
-        self.check_signature(sig)
         self.f = f
-        if sig.return_annotation is not inspect.Signature.empty:
-            self.return_annotation = sig.return_annotation
-        else:
-            self.return_annotation = ()
-        annotations = {arg: prm.annotation for arg,
-                       prm in sig.parameters.items()
-                       if prm.annotation is not inspect.Signature.empty}
-        self.arguments = tuple(
-            name for name, prm in sig.parameters.items() if name not in annotations)
-
-    class Computation:
-        call_template = "{}({})"
-        operation_template = "{return_values} = {call}"
-
-        def __init__(self, f, resource_args=None, return_resources=(), f_name=None,
-                     block_args=()):
-            self.f_name = f_name or f.__name__
-            sig = inspect.signature(f)
-            self.template = self.call_template.format("{__f__}", ", ".join(
-                "{" + arg + "}" for arg in sig.parameters))
-            self.call_template = self.template
-            annotations = tuple((arg, d_.unwrap(prm.annotation)) for arg,
-                                prm in sig.parameters.items()
-                                if prm.annotation is not inspect.Signature.empty)
-            tuple_annotations = ((arg, a) for arg, a in annotations
-                                 if not isinstance(a, Quantity.Resource))
-            invalid_annotations = tuple(arg for arg, a in tuple_annotations
-                                        if not isinstance(a, tuple)
-                                        or not all(isinstance(r, Quantity.Resource) for r in a))
-            if invalid_annotations:
-                raise ValueError(
-                    "Invalid annotations (not of type Resource) for arguments: {}".format(
-                        ", ".join(invalid_annotations)))
-            _resource_args = dict(annotations)
-            if resource_args is not None:
-                assert set(resource_args).isdisjoint(set(_resource_args))
-                _resource_args.update(resource_args)
-            return_annotation = sig.return_annotation
-
-            if block_args is not None:
-                for arg in block_args:
-                    _resource_args[arg] = _resource_args[arg].copy()
-            if return_annotation is not inspect.Signature.empty:
-                if not isinstance(return_annotation, tuple):
-                    return_annotation = (return_annotation,)
-                n_ret = len(return_annotation)
-                self.n_ret = n_ret
-                self.template = self.operation_template.format(
-                    return_values=", ".join(("{}",) * n_ret), call=self.template)
-                return_annotation = tuple(d_.unwrap(a)
-                                          for a in return_annotation)
-                if any(isinstance(r, Quantity.Resource) for r in return_annotation):
-                    return_resources = tuple((r if isinstance(r, Quantity.Resource)
-                                              else return_resources[i])
-                                             for i, r in enumerate(return_annotation))
-            else:
-                self.n_ret = 0
-            self.resource_args = _resource_args
-            self.return_resources = return_resources
-            self.f = f
-
-        def computation_dependencies(self):
-            return collect_computations(self.dependencies())
-
-        def dependencies(self):
-            deps = set()
-            for r in self.resource_args.values():
-                if isinstance(r, tuple):
-                    deps |= set(r)
-                else:
-                    deps.add(r)
-            return deps
-
-        def args_to_resources(self, ode_builder, slc_prefix=""):
-            def _expression(r, ode_builder):
-                if isinstance(r, tuple):
-                    return ", ".join(_r.expression(ode_builder, slc_prefix=slc_prefix) for _r in r)
-                return r.expression(ode_builder, slc_prefix=slc_prefix)
-            return {arg: _expression(r, ode_builder)
-                    for arg, r in self.resource_args.items()}
-
-        def return_values(self, ode_builder):
-            return tuple(ret.expression(ode_builder)
-                         for ret in self.return_resources)
-
-        def write_code_by_args(self, env, returns=(), **subst_args):
-            collisions = set(env) & set(returns)
-            if collisions:
-                raise ValueError(
-                    "Name collision: trying to assign to '{}' which is already defined".format(
-                        ", ".join(collisions)))
-            f_name = self.f_name
-            update_env(env, f_name, self.f)
-            return self.template.format(*returns, __f__=f_name, **subst_args)
-
-        def write_code(self, ode_builder, env, slc_prefix=""):
-            subst_args = self.args_to_resources(
-                ode_builder, slc_prefix=slc_prefix)
-            returns = self.return_values(ode_builder)
-            return self.write_code_by_args(env, returns=returns, **subst_args)
-
-    def computation_by_args(self, resource_args=None, **kwargs):
-        resource_args = resource_args or {}
-        _resource_args = set(resource_args)
-        missing_args = set(self.arguments) - _resource_args
-        if missing_args:
+        annotations = tuple((arg, prm.annotation) for arg,
+                            prm in sig.parameters.items())
+        missing_annotations = tuple(arg for arg, a in annotations
+                                    if a is inspect.Signature.empty)
+        if missing_annotations:
             raise ValueError(
-                "Missing quantity arguments for arguments {}".format(", ".join(missing_args)))
-        unexpected_args = _resource_args - set(self.arguments)
-        if unexpected_args:
+                "Missing annotations for arguments: {}".format(
+                    ", ".join(missing_annotations)))
+        invalid_annotations = tuple(arg for arg, a in annotations
+                                    if not isinstance(a, Expressible)
+                                    and not (isinstance(a, tuple)
+                                             and all(isinstance(q, Expressible) for q in a)))
+        if invalid_annotations:
             raise ValueError(
-                "Unexpected quantity arguments {}".format(", ".join(unexpected_args)))
-        return self.Computation(self.f, resource_args=resource_args, **kwargs)
+                "Invalid annotations (not of type Expressible) for arguments: {}".format(
+                    ", ".join(invalid_annotations)))
+        self.arguments = sum((tuplify(a) for _, a in annotations), ())
 
-    def fetch_args(self, parent):
-        return {arg: (get_resource_recursive(parent, arg)
-                      if arg != "self" else parent)
-                for arg in self.arguments}
+        if return_quantities is None:
+            return_quantities = sig.return_annotation
+            if return_quantities is inspect.Signature.empty:
+                return_quantities = ()
+            elif not isinstance(return_quantities, tuple):
+                return_quantities = (return_quantities,)
+        self.check_return_quantities(return_quantities)
+        self.return_quantities = return_quantities
+        # TODO: blockargs
+        # if block_args is not None:
+        #     for arg in block_args:
+        #         _resource_args[arg] = _resource_args[arg].copy()
 
-    def computation(self, parent, **kwargs):
-        resource_args = self.fetch_args(parent)
-        f_name = self.f.__name__
-        if parent.name:
-            f_name = "_".join(
-                tuple(parent.parent_names) + (parent.name, f_name))
-        f_name = self.f_prefix + f_name
-        return_resources = tuple(get_resource_recursive(parent, val)
-                                 for val in self.return_names()
-                                 if not isinstance(val, Quantity.Resource))
-        return self.computation_by_args(resource_args=resource_args,
-                                        return_resources=return_resources,
-                                        f_name=f_name,
-                                        **kwargs)
+    def __call__(self, *args, **kwargs):
+        return self.f(*args, **kwargs)
 
-    def return_names(self):
-        return_annotation = self.return_annotation or ()
-        if not isinstance(return_annotation, tuple):
-            return (return_annotation,)
-        return return_annotation
+    @classmethod
+    def check_return_quantities(cls, return_objects):
+        invalid_annotations = tuple(
+            str(i) for i, a in enumerate(return_objects)
+            if not isinstance(a, Quantity))
+        if invalid_annotations:
+            raise ValueError(
+                "Invalid return annotation. Objects at positions {}"
+                " are not of type Quantity".format(
+                    ", ".join(invalid_annotations)))
 
-    def check_signature(self, sig):
-        pass
+    def computation_dependencies(self):
+        return collect_computations(self.dependencies())
 
+    def dependencies(self):
+        return set(d_.unwrap(a) for a in self.arguments)
 
-def get_resource_recursive(e, addr):
-    *addr, q = addr.split(".")
-    target = e
-    for part in addr:
-        target = getattr(target, part)
-    return target.__resources__[q]
+    def write_code(self, ode_builder, env, slc_prefix=""):
+        returns = self.return_expressions(ode_builder)
+        return self._write_code(ode_builder, env, slc_prefix=slc_prefix,
+                                return_expressions=returns, operation=self.operation)
+
+    def _write_code(self, ode_builder, env, *, slc_prefix="", return_expressions, operation):
+        collisions = set(env) & set(return_expressions)
+        if collisions:
+            raise ValueError(
+                "Name collision: trying to assign to '{}' which is already defined".format(
+                    ", ".join(collisions)))
+        f_name = self.f_name()
+        update_env(env, f_name, self.f)
+        code = f_name + \
+            "(" + ", ".join(a.expression_view(ode_builder, slc_prefix=slc_prefix)
+                            for a in self.arguments) + ")"
+        if return_expressions:
+            code = ", ".join(return_expressions) + " " + \
+                operation + " " + code
+        return code
+
+    def return_expressions(self, ode_builder):
+        return tuple(ret.expression(ode_builder)
+                     for ret in self.return_quantities)
+
+    def f_name(self):
+        _name = self.f.__name__
+        if self.parent is not None and self.parent.name:
+            _name = "_".join(
+                tuple(self.parent.parent_names) + (self.parent.name, _name))
+        _name = self.f_prefix + _name
+        return _name
 
 
 class ComputedQuantityFunction(Function):
     f_prefix = "f_"
 
-    def return_names(self):
-        return ()
+
+class DerivativeBase(Function):
+    pass
 
 
-class Derivative(Function):
-    def __init__(self, f, **kwargs):
-        super().__init__(f, **kwargs)
-        if self.return_annotation is inspect.Signature.empty:
+class Derivative(DerivativeBase):
+    operation = "+="
+
+    def write_code(self, ode_builder, env, slc_prefix=""):
+        n_ret = len(self.return_quantities)
+        if n_ret > 1:
+            temp_vars = tuple("_tmp" + str(i) for i in range(n_ret))
+            code = self._write_code(ode_builder, env, slc_prefix=slc_prefix,
+                                    return_expressions=temp_vars, operation="=")
+            assignments = (ret + " += " + tmp for ret,
+                           tmp in zip(self.return_expressions(ode_builder), temp_vars))
+            code += " ; {}".format(" ; ".join(assignments))
+            return code
+        return super().write_code(ode_builder, env, slc_prefix=slc_prefix)
+
+    @classmethod
+    def check_return_quantities(cls, return_objects):
+        if not return_objects:
             raise ValueError(
-                "DxCallbacks must have a return annotation indicating"
+                "Derivatives must have a return annotation indicating"
                 " the quantity / quantities beeing changed")
-        if not (isinstance(self.return_annotation, tuple)
-                and all(isinstance(a, d_) for a in self.return_annotation)) \
-                and not isinstance(self.return_annotation, d_):
+        if not (isinstance(return_objects, tuple)
+                and all(isinstance(a, d_) for a in return_objects)) \
+                and not isinstance(return_objects, d_):
             raise ValueError(
                 "The return annotation has to be a d_ instance")
+        invalid_annotations = tuple(
+            str(i) for i, a in enumerate(return_objects)
+            if not isinstance(a, d_))
+        if invalid_annotations:
+            raise ValueError(
+                "Invalid return annotation. Objects at positions {}"
+                " are not of type d_".format(
+                    ", ".join(invalid_annotations)))
 
-    def return_names(self):
-        return tuple(d_.unwrap(ret) for ret in super().return_names())
-
-    class Computation(Function.Computation):
-        operation_template = "{return_values} += {call}"
-
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            if self.n_ret > 1:
-                temp_vars = tuple("_tmp" + str(i) for i in range(self.n_ret))
-                assignments = ("{} += " + tmp for tmp in temp_vars)
-                self.template = "{} = {call} ; {}".format(
-                    ", ".join(temp_vars), " ; ".join(assignments), call=self.call_template)
-
-        def return_values(self, ode_builder):
-            return tuple(ret.expression_dx(ode_builder)
-                         for ret in self.return_resources)
-
-        def dependencies(self):
-            return super().dependencies() | set(self.return_resources)
+    def dependencies(self):
+        return super().dependencies() | frozenset(d_.unwrap(r) for r in self.return_quantities)
 
 
-class DerivativeInline(Function):
+class DerivativeInline(DerivativeBase):
 
-    class Computation(Function.Computation):
-        def __init__(self, f, *args, **kwargs):
-            super().__init__(f, *args, **kwargs)
-            self.diff_args = frozenset(d_.get_args(f))
-            for x in self.diff_args:
-                if not isinstance(self.resource_args[x], StateFunction.Resource):
-                    raise TypeError(
-                        "{} is marked as d_ quantity"
-                        " but is no StateFunction".format(x))
-
-        def args_to_resources(self, ode_builder, slc_prefix=""):
-            resource_args = self.resource_args
-            subst_args = {arg: r.expression(ode_builder, slc_prefix=slc_prefix)
-                          for arg, r in self.resource_args.items() if arg not in self.diff_args}
-            for arg in self.diff_args:
-                subst_args[arg] = resource_args[arg].expression_dx(
-                    ode_builder, flatten_slice=False, slc_prefix=slc_prefix)
-            return subst_args
+    @classmethod
+    def check_return_quantities(cls, return_objects):
+        if return_objects:
+            raise ValueError(
+                "DerivativeInline does not accept return annotations")
 
 
-class d_:
-    def __init__(self, addr):
-        self.addr = addr
+class d_(Expressible):
+    def __init__(self, quantity):
+        if not isinstance(quantity, StateFunction):
+            raise TypeError(
+                "Only StateFunction can be differentiated")
+        self.quantity = quantity
+
+    def expression(self, ode_builder, slc_prefix=""):
+        return self.quantity.expression_dx(ode_builder, slc_prefix=slc_prefix,
+                                           flatten_slice=True)
+
+    def expression_view(self, ode_builder, slc_prefix=""):
+        return self.quantity.expression_dx(ode_builder, slc_prefix=slc_prefix,
+                                           flatten_slice=False)
 
     @classmethod
     def unwrap(cls, x):
         if isinstance(x, cls):
-            return x.addr
+            return x.quantity
         return x
-
-    @classmethod
-    def get_args(cls, f):
-        sig = inspect.signature(f)
-        return (arg for arg, prm in sig.parameters.items()
-                if isinstance(prm.annotation, cls))
 
 
 class CtrlFunction(Function):
@@ -491,7 +333,7 @@ class ODEBuilder:
         self._slice_factories = {}
         if rsc_t is not None:
             rsc_t.register(self)
-        for r in collect_resources_(**kwargs):
+        for r in collect_quantities_(**kwargs):
             r.register(self)
 
     @classmethod
@@ -502,20 +344,22 @@ class ODEBuilder:
                   **kwargs):
         dx_env = {}
         ode_builder = ode_builder or cls()
-        computations = collect_computations(collect_resources_(
+        computations = collect_computations(collect_quantities_(
             derivative_computations, ctrl_callback=ctrl_callback))
         dependencies = {computation: computation.computation_dependencies()
                         for computation in computations}
         computation_jobs = depcalc.depcalc(dependencies)
         code_lines = ode_builder.write_ode_code_by_args(
-            computation_jobs, derivative_computations, dx_env=dx_env, ctrl_callback=ctrl_callback,
+            computation_jobs,
+            derivative_computations,
+            dx_env=dx_env,
+            ctrl_callback=ctrl_callback,
             f_ctrl_get=f_ctrl_get,
             src_callback=src_callback,
             **kwargs)
         ode_builder.allocate_resources(dx_env)
         if env is not None:
             dx_env.update(env)
-        # print(code_generator.line_numbered_code_lines(code_lines))
         _dx = code_generator.Function.build(name="d_X", args=(StateFunction.storage_name, "t"),
                                             code_lines=code_lines,
                                             environment=dx_env)
@@ -549,23 +393,22 @@ class ODEBuilder:
         return code_lines
 
     @classmethod
-    def monitor_call(cls, computed_resources,
-                     env=None, ode_builder=None, **kwargs):
+    def monitor_call(cls, computed_quantities,
+                     env=None, ode_builder=None):
         ode_builder = ode_builder or cls()
         _env = {}
-        named_lengths = tuple((r, r.base.n) for r in computed_resources)
+        named_lengths = tuple((r, r.n) for r in computed_quantities)
         out_slices = tuple(structured_data.xtuple_len_to_slc(
             named_lengths, flatten_slice=True))
         expr_slices = ((r.expression(ode_builder), slc)
                        for r, slc in out_slices)
         computations = collect_computations(
-            collect_resources(computed_resources))
+            collect_resources(computed_quantities))
         dependencies = {computation: computation.computation_dependencies()
                         for computation in computations}
         computation_jobs = depcalc.depcalc(dependencies)
         code_lines = ode_builder.write_monitor_code_by_args(
             computation_jobs, env=_env, out_slices=expr_slices)
-        # print(code_generator.line_numbered_code_lines(code_lines))
         if env is not None:
             _env.update(env)
         _Y = code_generator.Function.build(name="Y", args=("t", MonitoredQuantity.storage_name,
@@ -652,23 +495,23 @@ def collect_computations(resources):
     return resources and frozenset.union(*(r.computations() for r in resources))
 
 
-def collect_resources_from_functions(functions):
+def collect_quantities_from_functions(functions):
     if not functions:
         return set()
     args = set.union(*(set(f.dependencies()) for f in functions))
     return collect_resources(args)
 
 
-def collect_resources_(functions=None, ctrl_callback=None, computed_resources=None):
+def collect_quantities_(functions=None, ctrl_callback=None, computed_quantities=None):
     resources = set()
     if functions:
-        resources |= collect_resources_from_functions(
+        resources |= collect_quantities_from_functions(
             functions)
     if ctrl_callback is not None:
-        resources |= collect_resources_from_functions(
+        resources |= collect_quantities_from_functions(
             (ctrl_callback,))
-    if computed_resources:
-        resources |= collect_resources(computed_resources)
+    if computed_quantities:
+        resources |= collect_resources(computed_quantities)
     return resources
 
 
@@ -706,203 +549,142 @@ class SliceFactory:
         return tuple((repr(r), l) for r, l in self.named_lengths)
 
 
-def collect(content, mapping):
-    for type_, dest in mapping.items():
-        dest.update({key: val for key, val in content
-                     if isinstance(val, type_)})
-
-
 class QuantityContainerMeta(type):
+    __register_types__ = (Quantity,
+                          DerivativeBase,
+                          Node)
+
     def __new__(mcs, name, bases, classdict):
-        quantities = {}
-        derivatives = {}
-        for base in bases:
-            quantities.update(base.__quantities__)
-            derivatives.update(base.__derivatives__)
-        mapping = {Quantity: quantities, Derivative: derivatives,
-                   DerivativeInline: derivatives}
-        collect(classdict.items(), mapping)
-        classdict["__derivatives__"] = derivatives
-        classdict["__quantities__"] = quantities
+        register = {}
+        for type_ in mcs.__register_types__:
+            _dct = {}
+            for base in bases:
+                _dct.update(base.__register__.get(type_, {}))
+            _dct.update({key: val for key, val in classdict.items()
+                         if isinstance(val, type_)})
+            register[type_] = _dct
+        classdict["__register__"] = register
 
         return type.__new__(mcs, name, bases, classdict)
 
-    def __call__(cls, *args, **kwargs):
-        instance = type.__call__(cls, *args, **kwargs)
-        return instance
-
 
 class QuantityContainer(metaclass=QuantityContainerMeta):
-
     def __new__(cls, *args, name=None, parent_names=(), **kwargs):
         instance = super().__new__(cls)
-        quantities = cls.__quantities__.copy()
-        instance.__quantities__ = quantities
-        instance.__derivatives__ = cls.__derivatives__.copy()
-        instance.__resources__ = {}
-        instance.__derivative_computations__ = {}
-        instance.__sub_elements__ = {}
+        instance.__register__ = {type_: subregister.copy()
+                                 for type_, subregister in cls.__register__.items()}
         instance.name = name
         instance.parent_names = parent_names
-        dependencies = {(n, q): set((arg, quantities[arg])
-                                    for arg in q.function.arguments
-                                    if arg in quantities)
-                        for n, q in quantities.items()
-                        if isinstance(q, ComputedQuantity)}
-        for name, q in depcalc.deporder(tuple(quantities.items()), dependencies):
-            setattr(instance, name, q.resource(parent=instance, alias=name))
-        for name, d in instance.__derivatives__.items():
-            computation = d.computation(instance)
-            instance.__derivative_computations__[name] = computation
-            setattr(instance, name, computation)
         return instance
 
-    def __init__(self, name=None, parent_names=()):
-        pass
+    def __init__(self, *args, **kwargs):
+        for n_name, n in self.__register__[Node].items():
+            n.bind_to_parent(self, n_name)
 
     def __repr__(self):
         _repr = self.name or super().__repr__()
         return ".".join(tuple(self.parent_names) + (_repr,))
 
-    def __setattr_quantity__(self, key, val):
-        self.__quantities__[key] = val
-        return self.__setattr_resource__(key, val.resource(parent=self, alias=key))
-
-    def __setattr_resource__(self, key, val):
-        self.__resources__[key] = val
-        return val
-
-    def __setattr_derivative__(self, key, val):
-        self.__derivatives__[key] = val
-        return self.__setattr_computation__(key, val.computation(self))
-
-    def __setattr_computation__(self, key, val):
-        self.__derivative_computations__[key] = val
-        return val
-
-    def __setattr_element__(self, key, val):
-        self.__sub_elements__[key] = val
-        return val
-
     def __setattr__(self, key, val):
-        val = self.set_child(key, val)
-        super().__setattr__(key, val)
-
-    def set_child(self, key, val):
-        typemapping = {Quantity: self.__setattr_quantity__,
-                       Quantity.Resource: self.__setattr_resource__,
-                       Derivative: self.__setattr_derivative__,
-                       DerivativeInline: self.__setattr_derivative__,
-                       Derivative.Computation: self.__setattr_computation__,
-                       DerivativeInline.Computation: self.__setattr_computation__,
-                       Element: self.__setattr_element__}
-        for type_, _setatr in typemapping.items():
+        for type_, subregister in self.__register__.items():
             if isinstance(val, type_):
-                return _setatr(key, val)
-        return val
-
-    def discard_child(self, key):
-        if key in self.__resources__:
-            del self.__resources__[key]
-        if key in self.__derivatives__:
-            del self.__derivatives__[key]
-        if key in self.__sub_elements__:
-            del self.__sub_elements__[key]
+                subregister[key] = val
+        super().__setattr__(key, val)
+        if isinstance(val, Node):
+            val.bind_to_parent(self, key)
 
     def __delattr__(self, key):
         super().__delattr__(key)
-        self.discard_child(key)
+        for subregister in self.__register__.values():
+            if key in subregister:
+                del subregister[key]
 
 
-class Model(QuantityContainer):
+class Element(QuantityContainer):
+    pass
 
-    t = ExternalQuantity(name="t", n=1)
+
+class ElementContainerMeta(QuantityContainerMeta):
+    __register_types__ = QuantityContainerMeta.__register_types__ + (Element,)
+
+
+class ElementContainer(QuantityContainer, metaclass=ElementContainerMeta):
+    def __new__(cls, *args, **kwargs):
+        instance = super().__new__(cls, *args, **kwargs)
+
+        for n, e in instance.__register__[Element].items():
+            e.name = n
+        return instance
+
+
+class Model(ElementContainer):
+    t = ExternalQuantity(alias="t", n=1)
 
     def __init__(self, **kwargs):
+        super().__init__()
         self.add(**kwargs)
+        self.run = self._run
 
     def add(self, **kwargs):
         for key, arg in kwargs.items():
             setattr(self, key, arg)
 
-    @classmethod
-    def from_file(cls, file_name, *args, **kwargs):
-        with open(file_name) as f:
-            return cls.from_stream(f, *args, **kwargs)
-
-    @classmethod
-    def from_stream(cls, stream, namespace):
-        return model_json.model_from_stream(stream, namespace, model_class=cls,
-                                            inject_name=frozenset(
-                                                (Element,
-                                                 GlobalExternalQuantity,
-                                                 ConstantQuantity)),
-                                            inject_parent_names=frozenset(
-                                                (Element,)),
-                                            foreign_quantity_wrapper=ForeignQuantity.anonymous)
-
     @staticmethod
-    def resource(type_):
-        def _resources(e):
-            return (resource for resource in e.__resources__.values()
-                    if isinstance(resource.base, type_))
-        return _resources
+    def quantities_by_type(type_):
+        def _quantities(e):
+            return (q for q in e.__register__[Quantity].values()
+                    if isinstance(q, type_))
+        return _quantities
 
     @staticmethod
     def _derivatives(e):
-        return e.__derivative_computations__.values()
+        return e.__register__[DerivativeBase].values()
 
     def derivatives(self):
-        return self.collect_element_resources(
+        return self.collect_element_quantities(
             self, self._derivatives)
 
-    def computed_resources(self):
-        return self.collect_element_resources(
-            self, self.resource(ComputedQuantity))
+    def computed_quantities(self):
+        return self.collect_element_quantities(
+            self, self.quantities_by_type(ComputedQuantity))
 
     @classmethod
-    def collect_element_resources(cls, e, type_, out=None):
+    def collect_element_quantities(cls, e, type_, out=None):
         if out is None:
             out = set()
         out |= set(type_(e))
-        for child in e.__sub_elements__.values():
-            cls.collect_element_resources(child, type_, out=out)
+        for child in e.__register__.get(Element, {}).values():
+            cls.collect_element_quantities(child, type_, out=out)
         return out
 
-    def external_resources(self):
-        return self.collect_element_resources(
-            self, self.resource(ExternalQuantity))
-
     def setup_ode(self, f_ctrl=None, block_ctrl_args=None, **kwargs):
-        ctrl_callback = f_ctrl and CtrlFunction(f_ctrl).computation(self,
-                                                                    block_args=block_ctrl_args)
-        derivative_computations = self.derivatives()
-        return ODEBuilder.setup_ode(self.t, derivative_computations,
+        ctrl_callback = f_ctrl and CtrlFunction(f_ctrl)
+        # .computation(self, block_args=block_ctrl_args)
+        derivatives = self.derivatives()
+        return ODEBuilder.setup_ode(self.t, derivatives,
                                     ctrl_callback=ctrl_callback,
                                     **kwargs)
 
     def monitor_call(self, monitored_arguments=None, **kwargs):
         if monitored_arguments is None:
-            monitored_resources = self.computed_resources()
+            monitored_resources = self.computed_quantities()
         else:
             monitored_resources = tuple(
                 getattr_recursive(self, arg) for arg in monitored_arguments)
             wrong_args = tuple(arg for arg, r in zip(monitored_arguments, monitored_resources)
-                               if not isinstance(r, ComputedQuantity.Resource))
+                               if not isinstance(r, ComputedQuantity))
             if wrong_args:
-                raise ValueError("Arguments {} are not computed resources".format(
+                raise ValueError("Arguments {} are not of type ComputedQuantity".format(
                     ", ".join(".".join(arg) for arg in wrong_args)))
         return ODEBuilder.monitor_call(monitored_resources, **kwargs)
 
     def compile(self, f_ctrl=None):
         sources = timeseries_interpolant()
-        monitor_call_args = {"src_callback": sources}
         ode_args = {"src_callback": sources}
         if f_ctrl is not None:
-            ctrl_resources = collect_resources_from_functions((
-                CtrlFunction(f_ctrl).computation_by_args(),))
+            ctrl_resources = collect_quantities_from_functions((
+                CtrlFunction(f_ctrl),))
             ctrl = controller()
-            monitor_call_args["f_ctrl_get"] = ctrl
             ode_args["f_ctrl_get"] = ctrl
             ode_args["f_ctrl"] = f_ctrl
         else:
@@ -910,17 +692,21 @@ class Model(QuantityContainer):
         ode_builder = ODEBuilder(
             rsc_t=self.t,
             functions=self.derivatives(),
-            computed_resources=ctrl_resources | self.computed_resources())
+            computed_quantities=ctrl_resources | self.computed_quantities())
         d_X = self.setup_ode(
             ode_builder=ode_builder, **ode_args)
         Y = self.monitor_call(
-            ode_builder=ode_builder, **monitor_call_args)
+            ode_builder=ode_builder)
         return d_X, Y
 
-    def run(self, initial_data, t, f_ctrl=None, **kwargs):
+    def _run(self, initial_data, t, f_ctrl=None, **kwargs):
         d_X, Y = self.compile(f_ctrl=f_ctrl)
 
         return simulate(initial_data, t, d_X, Y=Y, **kwargs)
+
+    @classmethod
+    def run(cls, *args, **kwargs):
+        return cls()._run(*args, **kwargs)
 
 
 def solve_ode(d_X, x0, t, tcrit=None, Y=None, exception_on_error=False, out=None):
@@ -956,8 +742,7 @@ def simulate(initial_data, t, d_X, Y=None, tcrit=None, t_ctrl_sampler=None,
     x0 = arrange_data(initial_data, d_X.quantity_lengths[StateFunction])
     u_lengths = d_X.quantity_lengths.get(ManipulatedVariable)
     if u_lengths is not None:
-        u0 = arrange_data(
-            initial_data, u_lengths)
+        u0 = arrange_data(initial_data, u_lengths)
         d_X.u[()] = u0
         if d_X.ctrl is not None:
             if t_ctrl_sampler is not None:
@@ -1040,14 +825,6 @@ def dump(t, x, u, d_X):
                                              ';'.join(map(str, u)))
 
 
-class Element(QuantityContainer):
-    def __init__(self, name, parent_names=()):
-        super().__init__(name=name, parent_names=parent_names)
-
-    def __new__(cls, name, *args, **kwargs):
-        return super().__new__(cls, *args, name=name, **kwargs)
-
-
 def timeseries_interpolant(*args):
     """
     Returns an interpolant for the timeseries dat with timestamps t
@@ -1104,7 +881,6 @@ def t_sampler(Delta_t):
 
 
 def controller(*args):
-
     max_end = None
     _end = None
     _t = ()
@@ -1147,3 +923,9 @@ def controller(*args):
 
     _get.set_data = set_data
     return _get
+
+
+def tuplify(x):
+    if isinstance(x, tuple):
+        return x
+    return (x,)
